@@ -16,6 +16,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
+  OLLAMA_ADMIN_TOOLS,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
@@ -444,6 +445,11 @@ async function buildContainerArgs(
     for (const [key, value] of Object.entries(providerContribution.env)) {
       args.push('-e', `${key}=${value}`);
     }
+  }
+
+  // Forward Ollama admin tools flag if enabled
+  if (OLLAMA_ADMIN_TOOLS) {
+    args.push('-e', 'OLLAMA_ADMIN_TOOLS=true');
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
