@@ -4,16 +4,27 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  wechat-ilink-client@0.1.0:
+    hash: b6e6fda210260ac363e26346fff26d149f451dd35c3e648e69f15b8ca1fd09ba
+    path: patches/wechat-ilink-client@0.1.0.patch
+
 importers:
 
   .:
     dependencies:
+      '@chat-adapter/telegram':
+        specifier: 4.26.0
+        version: 4.26.0
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
       '@clack/prompts':
         specifier: ^1.2.0
         version: 1.2.0
+      '@nanoco/nanoclaw-dashboard':
+        specifier: ^0.3.0
+        version: 0.3.0
       '@onecli-sh/sdk':
         specifier: ^0.3.1
         version: 0.3.1
@@ -29,6 +40,9 @@ importers:
       kleur:
         specifier: ^4.1.5
         version: 4.1.5
+      wechat-ilink-client:
+        specifier: 0.1.0
+        version: 0.1.0(patch_hash=b6e6fda210260ac363e26346fff26d149f451dd35c3e648e69f15b8ca1fd09ba)
     devDependencies:
       '@eslint/js':
         specifier: ^9.35.0
@@ -68,6 +82,12 @@ importers:
         version: 4.1.4(@types/node@22.19.17)(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0))
 
 packages:
+
+  '@chat-adapter/shared@4.26.0':
+    resolution: {integrity: sha512-YD0MGktFXrArUqTBsyPfL5vkdD1WBS58PAWO0oVrMQAMmPxpAXfWGjBtZCkf3y8R8Svb0uVuVXiMZSForaEnMQ==}
+
+  '@chat-adapter/telegram@4.26.0':
+    resolution: {integrity: sha512-PE2HoCQ4648VNKZTuHFanQNoYzM/niNoSbDyYlPq6VOoB5qsoo1ctR8TERyl1EfPBNexWZpSWYrrnQPr15LUfA==}
 
   '@clack/core@1.2.0':
     resolution: {integrity: sha512-qfxof/3T3t9DPU/Rj3OmcFyZInceqj/NVtO9rwIuJqCUgh32gwPjpFQQp/ben07qKlhpwq7GzfWpST4qdJ5Drg==}
@@ -296,6 +316,10 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+
+  '@nanoco/nanoclaw-dashboard@0.3.0':
+    resolution: {integrity: sha512-AT1sLe/PxtSMytMqXOH5xeoFw9gyYpEhXC4XIA4/940Fmw45FWAJfdQzyVRi9JZKhb2b6Qr6nqVfQRgAB3LoaA==}
+    hasBin: true
 
   '@napi-rs/wasm-runtime@1.1.4':
     resolution: {integrity: sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow==}
@@ -1210,6 +1234,10 @@ packages:
     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
     engines: {node: '>=6'}
 
+  qrcode-terminal@0.12.0:
+    resolution: {integrity: sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ==}
+    hasBin: true
+
   rc@1.2.8:
     resolution: {integrity: sha512-y3bGgqKj3QBdxLbLkomlohkvsA8gdAiUQlSBJnBhfn+BPxg4bc62d8TcBW15wavDfgexCgccckhcZvywyQYPOw==}
     hasBin: true
@@ -1467,6 +1495,10 @@ packages:
       jsdom:
         optional: true
 
+  wechat-ilink-client@0.1.0:
+    resolution: {integrity: sha512-/gsWGEGEsWA7C5cgfKtguCL7QPdT95I1HfHHiRcHtwQppwVfgD8aDL4m4soANp1qQDl5RgiJ7q9gh9X5cXUfqA==}
+    engines: {node: '>=20'}
+
   which@2.0.2:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
     engines: {node: '>= 8'}
@@ -1492,6 +1524,19 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
+
+  '@chat-adapter/shared@4.26.0':
+    dependencies:
+      chat: 4.26.0
+    transitivePeerDependencies:
+      - supports-color
+
+  '@chat-adapter/telegram@4.26.0':
+    dependencies:
+      '@chat-adapter/shared': 4.26.0
+      chat: 4.26.0
+    transitivePeerDependencies:
+      - supports-color
 
   '@clack/core@1.2.0':
     dependencies:
@@ -1657,6 +1702,8 @@ snapshots:
   '@humanwhocodes/retry@0.4.3': {}
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
+
+  '@nanoco/nanoclaw-dashboard@0.3.0': {}
 
   '@napi-rs/wasm-runtime@1.1.4(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)':
     dependencies:
@@ -2704,6 +2751,9 @@ snapshots:
 
   punycode@2.3.1: {}
 
+  qrcode-terminal@0.12.0:
+    optional: true
+
   rc@1.2.8:
     dependencies:
       deep-extend: 0.6.0
@@ -2959,6 +3009,10 @@ snapshots:
       '@types/node': 22.19.17
     transitivePeerDependencies:
       - msw
+
+  wechat-ilink-client@0.1.0(patch_hash=b6e6fda210260ac363e26346fff26d149f451dd35c3e648e69f15b8ca1fd09ba):
+    optionalDependencies:
+      qrcode-terminal: 0.12.0
 
   which@2.0.2:
     dependencies:

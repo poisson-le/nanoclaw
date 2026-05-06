@@ -1,0 +1,66 @@
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 3f14dcf78912f18ecf21942326c2ec1dc96baba4..6266e59ff3a55fe5460323b6f6c7588589ba1b27 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -56,14 +56,15 @@ var ApiClient = class {
+ 		return this.token;
+ 	}
+ 	buildBaseInfo() {
+-		return { channel_version: this.channelVersion };
++		return { channel_version: this.channelVersion, bot_agent: "OpenClaw" };
+ 	}
+ 	buildHeaders(bodyStr) {
+ 		const headers = {
+ 			"Content-Type": "application/json",
+ 			AuthorizationType: "ilink_bot_token",
+ 			"Content-Length": String(Buffer.byteLength(bodyStr, "utf-8")),
+-			"X-WECHAT-UIN": randomWechatUin()
++			"X-WECHAT-UIN": randomWechatUin(),
++			"iLink-App-ClientVersion": "132097"
+ 		};
+ 		if (this.token?.trim()) headers.Authorization = `Bearer ${this.token.trim()}`;
+ 		if (this.routeTag) headers.SKRouteTag = this.routeTag;
+@@ -171,12 +172,17 @@ var ApiClient = class {
+ 		const base = ensureTrailingSlash(this.baseUrl);
+ 		const bt = botType ?? "3";
+ 		const url = new URL(`ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(bt)}`, base);
+-		const headers = {};
++		const body = JSON.stringify({ local_token_list: [] });
++		const headers = {
++			"Content-Type": "application/json",
++			"Content-Length": String(Buffer.byteLength(body, "utf-8")),
++			"iLink-App-ClientVersion": "132097"
++		};
+ 		if (this.routeTag) headers.SKRouteTag = this.routeTag;
+-		const res = await fetch(url.toString(), { headers });
++		const res = await fetch(url.toString(), { method: "POST", headers, body });
+ 		if (!res.ok) {
+-			const body = await res.text().catch(() => "(unreadable)");
+-			throw new Error(`Failed to fetch QR code: ${res.status} ${res.statusText}: ${body}`);
++			const body2 = await res.text().catch(() => "(unreadable)");
++			throw new Error(`Failed to fetch QR code: ${res.status} ${res.statusText}: ${body2}`);
+ 		}
+ 		return await res.json();
+ 	}
+@@ -187,7 +193,7 @@ var ApiClient = class {
+ 	async pollQRCodeStatus(qrcode) {
+ 		const base = ensureTrailingSlash(this.baseUrl);
+ 		const url = new URL(`ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`, base);
+-		const headers = { "iLink-App-ClientVersion": "1" };
++		const headers = { "iLink-App-ClientVersion": "132097" };
+ 		if (this.routeTag) headers.SKRouteTag = this.routeTag;
+ 		const controller = new AbortController();
+ 		const timer = setTimeout(() => controller.abort(), QR_LONG_POLL_TIMEOUT_MS);
+@@ -269,6 +275,12 @@ async function loginWithQRCode(api, opts = {}) {
+ 		switch (status.status) {
+ 			case "wait": break;
+ 			case "scaned": break;
++			case "scaned_but_redirect": {
++				if (status.redirect_host) {
++					api.baseUrl = `https://${status.redirect_host}`;
++				}
++				break;
++			}
+ 			case "expired": {
+ 				refreshCount++;
+ 				if (refreshCount > maxRefreshes) return {

@@ -11,6 +11,7 @@
  * so even if this table is stale the host's enforcement is authoritative.
  */
 import { getInboundDb } from './db/connection.js';
+import { getSessionRouting } from './db/session-routing.js';
 
 export interface DestinationEntry {
   name: string;
@@ -93,7 +94,48 @@ export function buildSystemPromptAddendum(assistantName?: string): string {
 
 function buildDestinationsSection(): string {
   const all = getAllDestinations();
+  const routing = getSessionRouting();
+  const hasSessionChannel = !!(routing.channel_type && routing.platform_id);
 
+  // When there's a live session channel, plain text replies go there automatically.
+  // Named destinations (agent_destinations) are additional / optional targets.
+  if (hasSessionChannel) {
+    if (all.length === 0) {
+      return [
+        '## Sending messages',
+        '',
+        'Just write your response directly — it will be delivered to the current conversation.',
+        '',
+        'To mark something as scratchpad (logged but not sent), wrap it in `<internal>...</internal>`.',
+        '',
+        'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool.',
+      ].join('\n');
+    }
+
+    const lines = [
+      '## Sending messages',
+      '',
+      'Just write your response directly — it will be delivered to the current conversation.',
+      '',
+      'You can also send messages to these additional destinations:',
+      '',
+    ];
+    for (const d of all) {
+      const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
+      lines.push(`- \`${d.name}\`${label}`);
+    }
+    lines.push('');
+    lines.push('To send to an additional destination, wrap it in a `<message to="name">...</message>` block.');
+    lines.push('Text outside `<message>` blocks goes to the current conversation (not scratchpad).');
+    lines.push('Use `<internal>...</internal>` to log something without sending it anywhere.');
+    lines.push('');
+    lines.push(
+      'To send a message mid-response, call the `send_message` MCP tool. Omit `to` to send to the current conversation.',
+    );
+    return lines.join('\n');
+  }
+
+  // No session channel — fall back to named-destination-only mode.
   if (all.length === 0) {
     return [
       '## Sending messages',

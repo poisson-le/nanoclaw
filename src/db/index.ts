@@ -22,7 +22,16 @@ export {
   getMessagingGroupAgentByPair,
   updateMessagingGroupAgent,
   deleteMessagingGroupAgent,
+  getMessagingGroupsByAgentGroup,
 } from './messaging-groups.js';
+export {
+  createDestination,
+  getDestinations,
+  getDestinationByName,
+  getDestinationByTarget,
+  hasDestination,
+  deleteDestination,
+} from '../modules/agent-to-agent/db/agent-destinations.js';
 export {
   createSession,
   getSession,

@@ -3,6 +3,8 @@ onlyBuiltDependencies:
   - esbuild
   - protobufjs
   - sharp
+patchedDependencies:
+  wechat-ilink-client@0.1.0: patches/wechat-ilink-client@0.1.0.patch
 
 pnpm:
   minimumReleaseAge: 4320
