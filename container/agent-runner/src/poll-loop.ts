@@ -7,6 +7,7 @@ import {
   migrateLegacyContinuation,
   setContinuation,
 } from './db/session-state.js';
+import { getSessionRouting } from './db/session-routing.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, isRunnerCommand, stripInternalTags, type RoutingContext } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -94,6 +95,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markProcessing(ids);
 
     const routing = extractRouting(messages);
+    // session_routing is the authoritative reply channel set by the host on
+    // every container wake. Override the channel from extractRouting (which
+    // reads messages[0]) because agent-type inbound messages — e.g. approval
+    // notifications — can appear first in the batch and would otherwise
+    // misdirect plain-text replies to the agent channel instead of the user.
+    const sessionRouting = getSessionRouting();
+    if (sessionRouting.channel_type && sessionRouting.platform_id) {
+      routing.channelType = sessionRouting.channel_type;
+      routing.platformId = sessionRouting.platform_id;
+      routing.threadId = sessionRouting.thread_id;
+    }
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
