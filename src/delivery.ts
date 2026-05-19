@@ -85,6 +85,83 @@ function archiveComplianceEnvelope(envelope: ComplianceEnvelope): void {
   fs.appendFileSync(path.join(dir, `${day}.jsonl`), JSON.stringify(envelope) + '\n');
 }
 
+/**
+ * Host-side auto-cc for Compliance. Any agent that has a `compliance`
+ * destination wired gets its outbound automatically archived to the
+ * Compliance log directory — no seed-level cc directive required, no
+ * agent-side participation. Replaces the fragile seed-enforced cc that
+ * relied on the model remembering to emit a `<message to="compliance">`
+ * block on every reply (Claude Code preset frequently overrides this).
+ *
+ * Opt-in by destination wiring: if an agent has no `compliance` destination,
+ * no auto-archive happens. This keeps the mechanism explicit and lets
+ * specific agents (e.g. Compliance itself, or future opt-out cases) skip
+ * archival cleanly.
+ *
+ * Best-effort: any error here is logged and swallowed; we never block
+ * delivery on archive failure.
+ */
+function autoArchiveAgentOutbound(
+  sourceAgentGroupId: string,
+  msg: { channel_type: string | null; platform_id: string | null },
+  content: { text?: unknown; operation?: unknown; emoji?: unknown; messageId?: unknown; files?: unknown },
+): void {
+  // Skip Compliance's own outbound — it doesn't audit itself.
+  if (sourceAgentGroupId === COMPLIANCE_AGENT_GROUP_ID) return;
+  // Skip messages going TO Compliance — the dedicated ingest path handles those.
+  if (msg.channel_type === 'agent' && msg.platform_id === COMPLIANCE_AGENT_GROUP_ID) return;
+
+  // Source agent must have a 'compliance' destination wired to opt in.
+  // Direct DB read rather than the projection (which lives in inbound.db per
+  // session and we're host-side here without that handle).
+  const row = getDb()
+    .prepare(
+      "SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND local_name = 'compliance' AND target_id = ? LIMIT 1",
+    )
+    .get(sourceAgentGroupId, COMPLIANCE_AGENT_GROUP_ID);
+  if (!row) return;
+
+  const sourceAgent = getAgentGroup(sourceAgentGroupId);
+  if (!sourceAgent) return;
+  const fromName = sourceAgent.name.toLowerCase();
+
+  // Forwards of Compliance alerts are themselves the alert content — don't
+  // double-archive (the original alert already left a record on Compliance's
+  // side via its own dispatch).
+  const text = typeof content.text === 'string' ? (content.text as string) : '';
+  if (text.startsWith('Compliance alert')) return;
+
+  // Build a literal `content` value mirroring the agent-side cc convention.
+  let contentValue: string;
+  if (text) {
+    contentValue = text;
+  } else if (content.operation === 'reaction' && content.emoji && content.messageId) {
+    contentValue = `[reaction: ${String(content.emoji)} on message #${String(content.messageId)}]`;
+  } else if (Array.isArray(content.files) && content.files.length > 0) {
+    contentValue = `[sent file: ${content.files.join(', ')}]`;
+  } else {
+    contentValue = JSON.stringify(content);
+  }
+
+  // Resolve target label. For agent-targeted messages use the target agent
+  // name; for channel messages use the platform_id verbatim.
+  let toLabel: string;
+  if (msg.channel_type === 'agent' && msg.platform_id) {
+    const targetAgent = getAgentGroup(msg.platform_id);
+    toLabel = targetAgent ? targetAgent.name.toLowerCase() : msg.platform_id;
+  } else {
+    toLabel = msg.platform_id ?? '';
+  }
+
+  const envelope: ComplianceEnvelope = {
+    from: fromName,
+    to: toLabel,
+    timestamp: new Date().toISOString(),
+    content: contentValue,
+  };
+  archiveComplianceEnvelope(envelope);
+}
+
 /** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
 const deliveryAttempts = new Map<string, number>();
 
@@ -308,6 +385,17 @@ async function deliverMessage(
   if (msg.kind === 'system') {
     await handleSystemAction(content, session, inDb);
     return;
+  }
+
+  // Host-side Compliance auto-cc: archive every outbound from any agent that
+  // has a `compliance` destination wired. Replaces fragile seed-based cc.
+  // Best-effort — never blocks delivery.
+  if (msg.kind === 'chat') {
+    try {
+      autoArchiveAgentOutbound(session.agent_group_id, msg, content);
+    } catch (err) {
+      log.error('Compliance auto-archive failed', { msgId: msg.id, err });
+    }
   }
 
   // Agent-to-agent — route to target session via the agent-to-agent module.
