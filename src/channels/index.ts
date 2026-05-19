@@ -8,4 +8,5 @@
 
 import './cli.js';
 import './telegram.js';
+import './telegram-tianyi.js';
 import './wechat.js';
