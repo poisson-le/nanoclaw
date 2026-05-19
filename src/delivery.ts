@@ -7,6 +7,9 @@
  *   - Tracks delivery in inbound.db's `delivered` table (host-owned)
  *   - Never writes to outbound.db — preserves single-writer-per-file invariant
  */
+import fs from 'fs';
+import path from 'path';
+
 import type Database from 'better-sqlite3';
 
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
@@ -30,6 +33,57 @@ import type { Session } from './types.js';
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+
+// Compliance is a sink-style agent: it should not spawn a container for every
+// cc'd inbound, and its conversational replies must never loop back to senders.
+// Two guards in deliverMessage below: (1) outbound filter — drop Compliance's
+// outbound unless it begins with "Compliance alert"; (2) ingest archive —
+// when an agent targets Compliance, write the envelope to a host-managed log
+// directory (Compliance reads it via a RO mount) and skip the agent route.
+// Hardcoded for now — if other sink agents emerge, promote to a column on
+// `agent_groups`.
+const COMPLIANCE_AGENT_GROUP_ID = 'ag-1779121017094-2i35ns';
+const COMPLIANCE_LOGS_DIR = '/home/aaron/nanoclaw-v2/data/compliance-logs';
+
+interface ComplianceEnvelope {
+  from: string;
+  to: string;
+  timestamp: string;
+  content: unknown;
+}
+
+/**
+ * Detect a well-formed cc envelope inside an agent-to-agent message.
+ * Returns the parsed envelope iff the message's `text` field parses as JSON
+ * with all four required string fields (from, to, timestamp) plus content.
+ * Anything else (raw text, missing fields, malformed JSON) returns null,
+ * signalling the caller to fall through to normal routing — used so direct
+ * admin/bootstrap messages can still reach Compliance's container.
+ */
+function parseComplianceEnvelope(content: unknown): ComplianceEnvelope | null {
+  const text = typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+  if (!text) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const p = parsed as Record<string, unknown>;
+  if (typeof p.from !== 'string' || !p.from) return null;
+  if (typeof p.to !== 'string' || !p.to) return null;
+  if (typeof p.timestamp !== 'string' || !p.timestamp) return null;
+  if (!('content' in p)) return null;
+  return { from: p.from, to: p.to, timestamp: p.timestamp, content: p.content };
+}
+
+function archiveComplianceEnvelope(envelope: ComplianceEnvelope): void {
+  const day = new Date().toISOString().slice(0, 10);
+  const dir = path.join(COMPLIANCE_LOGS_DIR, envelope.from);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.appendFileSync(path.join(dir, `${day}.jsonl`), JSON.stringify(envelope) + '\n');
+}
 
 /** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
 const deliveryAttempts = new Map<string, number>();
@@ -261,6 +315,46 @@ async function deliverMessage(
   // `agent_destinations` table won't exist and `routeAgentMessage`'s permission
   // check will throw, which falls into the normal retry → mark-failed path.
   if (msg.channel_type === 'agent') {
+    // Compliance outbound filter — see COMPLIANCE_AGENT_GROUP_ID block above.
+    if (session.agent_group_id === COMPLIANCE_AGENT_GROUP_ID) {
+      const text = typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+      if (!text.startsWith('Compliance alert')) {
+        log.info('Compliance outbound dropped (not an alert)', {
+          msgId: msg.id,
+          targetAgentGroupId: msg.platform_id,
+          preview: text.substring(0, 60),
+        });
+        return;
+      }
+    }
+
+    // Compliance ingest — when an agent targets Compliance with a well-formed
+    // cc envelope, archive to the host-managed log directory and skip routing.
+    // Messages that target Compliance but aren't envelopes (admin instructions,
+    // bootstrap commands, direct queries) fall through to normal routing so
+    // they actually reach Compliance's container.
+    if (msg.platform_id === COMPLIANCE_AGENT_GROUP_ID) {
+      const envelope = parseComplianceEnvelope(content);
+      if (envelope) {
+        try {
+          archiveComplianceEnvelope(envelope);
+          log.info('Compliance ingest archived', {
+            msgId: msg.id,
+            from: envelope.from,
+          });
+        } catch (err) {
+          log.error('Compliance archive failed', { msgId: msg.id, err });
+          // Swallow — losing one log line shouldn't block delivery.
+        }
+        return;
+      }
+      log.info('Compliance direct message routed (not an envelope)', {
+        msgId: msg.id,
+        from: session.agent_group_id,
+      });
+      // fall through to normal routing
+    }
+
     if (!hasTable(getDb(), 'agent_destinations')) {
       throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
     }
