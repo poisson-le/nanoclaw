@@ -304,8 +304,8 @@ export class ClaudeProvider implements AgentProvider {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
-        systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
+        pathToClaudeCodeExecutable: 'claude',
+        systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, excludeDynamicSections: true } : undefined,
         allowedTools: [
           ...TOOL_ALLOWLIST,
           ...Object.keys(this.mcpServers).map(mcpAllowPattern),
@@ -335,6 +335,13 @@ export class ClaudeProvider implements AgentProvider {
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
+
+        if ('usage' in message && message.usage) {
+          const u = message.usage as { cache_creation_input_tokens?: number; cache_read_input_tokens?: number };
+          if (u.cache_creation_input_tokens || u.cache_read_input_tokens) {
+            log(`Cache metrics — creation: ${u.cache_creation_input_tokens ?? 0}, read: ${u.cache_read_input_tokens ?? 0}`);
+          }
+        }
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };

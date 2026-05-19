@@ -90,19 +90,34 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 #     binary (linux-arm64 variant on our image). Without the allowlist
 #     the SDK fails at spawn time with "native binary not found".
 ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
+ENV PATH="$PNPM_HOME/bin:$PNPM_HOME:$PATH"
 RUN corepack enable
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
+# Tell pnpm which packages are allowed to run their postinstall scripts.
+# Both legacy .npmrc kebab-case (for older pnpm) and CLI config (for pnpm 11.x,
+# which no longer reliably reads the .npmrc form for global installs) — belt-and-braces.
+RUN echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
     echo "only-built-dependencies[]=@anthropic-ai/claude-code" >> /root/.npmrc && \
+    pnpm config set onlyBuiltDependencies '["agent-browser","@anthropic-ai/claude-code"]' --global || true
+
+RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "vercel@${VERCEL_VERSION}"
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
 
+# pnpm 11.x marks store files read-only after install, and may silently skip the
+# claude-code postinstall (which downloads the platform-native binary). Without
+# it, /pnpm/bin/claude is a 447-byte stub that errors with "native binary not
+# installed". Run install.cjs explicitly after chmod'ing the store, then verify
+# the binary actually works — fail the build if it doesn't, so we never ship a
+# broken image again.
 RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+    pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && \
+    chmod -R u+w /pnpm/store && \
+    INSTALL_CJS="$(find /pnpm -name install.cjs -path '*@anthropic-ai/claude-code*' 2>/dev/null | head -1)" && \
+    test -n "$INSTALL_CJS" && node "$INSTALL_CJS" && \
+    /pnpm/bin/claude --version
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
