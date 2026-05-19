@@ -241,6 +241,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const channelId = adapter.channelIdFromThreadId(thread.id);
         log.info('Inbound DM received', {
           adapter: adapter.name,
+          adapterUserName: (adapter as any).userName,
           channelId,
           sender: (message.author as any)?.fullName ?? (message.author as any)?.userId ?? 'unknown',
           threadId: thread.id,
