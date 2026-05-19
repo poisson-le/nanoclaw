@@ -362,7 +362,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        const telegramMsgId = (content.messageId as string).split(':').slice(0, 2).join(':');
+        await adapter.addReaction(tid, telegramMsgId, content.emoji as string);
         return;
       }
 
