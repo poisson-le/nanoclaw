@@ -448,12 +448,18 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
 
   const scratchpad = stripInternalTags(scratchpadParts.join(''));
 
-  // Single-destination shortcut: the agent wrote plain text — send to
-  // the session's originating channel (from session_routing) if available,
-  // otherwise fall back to the single destination.
-  if (sent === 0 && scratchpad) {
+  // Auto-route free text (anything outside <message> blocks) as a reply to
+  // the originating channel/thread. This fires regardless of how many
+  // <message> blocks were dispatched — agents often emit explicit blocks
+  // AND a parallel reply to the sender (e.g. an audit cc + a user-facing
+  // reply). Previously gated on `sent === 0`, which silently dropped the
+  // user-facing reply whenever an explicit block was also present.
+  //
+  // True scratchpad (text the agent wants logged but NOT sent) must be
+  // marked explicitly with <internal>...</internal> tags — those are
+  // stripped above and never reach this branch.
+  if (scratchpad) {
     if (routing.channelType && routing.platformId) {
-      // Reply to the channel/thread the message came from
       writeMessageOut({
         id: generateId(),
         in_reply_to: routing.inReplyTo,
@@ -465,10 +471,15 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
       });
       return;
     }
-    const all = getAllDestinations();
-    if (all.length === 1) {
-      sendToDestination(all[0], scratchpad, routing);
-      return;
+    // No routing context (e.g. host-initiated wake with no inbound origin).
+    // Single-destination shortcut: only when no explicit blocks were sent,
+    // to avoid duplicating an explicit dispatch.
+    if (sent === 0) {
+      const all = getAllDestinations();
+      if (all.length === 1) {
+        sendToDestination(all[0], scratchpad, routing);
+        return;
+      }
     }
   }
 
