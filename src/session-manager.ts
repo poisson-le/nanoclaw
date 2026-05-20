@@ -210,6 +210,13 @@ export function writeSessionMessage(
      * a trigger-1 message does arrive.
      */
     trigger?: 0 | 1;
+    /**
+     * For agent-to-agent inbound: the calling session's id. Used by the
+     * reply router to send agent responses back to the correct caller
+     * session when the target agent has multiple active sessions. Omit for
+     * Telegram / CLI / scheduled / self-mod inbound.
+     */
+    sourceSessionId?: string | null;
   },
 ): void {
   // Extract base64 attachment data, save to inbox, replace with file paths
@@ -228,6 +235,7 @@ export function writeSessionMessage(
       processAfter: message.processAfter ?? null,
       recurrence: message.recurrence ?? null,
       trigger: message.trigger ?? 1,
+      sourceSessionId: message.sourceSessionId ?? null,
     });
   } finally {
     db.close();

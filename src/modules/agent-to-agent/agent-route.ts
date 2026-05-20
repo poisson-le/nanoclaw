@@ -23,12 +23,56 @@ import path from 'path';
 
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { findReplyTargetSession } from '../../db/session-db.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
-import { resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
+import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { hasDestination } from './db/agent-destinations.js';
+
+/**
+ * Look at the SENDER's inbound.db for the most recent message FROM the
+ * target agent group. If that message was stamped with a source_session_id
+ * (i.e. it was a routed A2A dispatch FROM a specific target session), the
+ * reply goes back to that originating session. Otherwise return null and
+ * fall back to legacy "agent-shared" resolution.
+ *
+ * This fixes the silent misrouting when the target has multiple active
+ * sessions (e.g. an orchestrator wired to both a DM and a group chat).
+ */
+function resolveReplyTargetSession(senderSession: Session, targetAgentGroupId: string): Session | null {
+  let inboundDb: ReturnType<typeof openInboundDb> | null = null;
+  try {
+    inboundDb = openInboundDb(senderSession.agent_group_id, senderSession.id);
+    const replyTargetSessionId = findReplyTargetSession(inboundDb, targetAgentGroupId);
+    if (!replyTargetSessionId) return null;
+    const candidate = getSession(replyTargetSessionId);
+    // Validate the session still belongs to the right agent and is active.
+    if (
+      candidate &&
+      candidate.agent_group_id === targetAgentGroupId &&
+      candidate.status === 'active'
+    ) {
+      log.debug('Reply routed to originating caller session', {
+        sender: senderSession.id,
+        target: candidate.id,
+        targetAgentGroupId,
+      });
+      return candidate;
+    }
+    return null;
+  } catch (err) {
+    log.warn('resolveReplyTargetSession failed; falling back to legacy resolution', {
+      err: err instanceof Error ? err.message : String(err),
+      senderSessionId: senderSession.id,
+      targetAgentGroupId,
+    });
+    return null;
+  } finally {
+    inboundDb?.close();
+  }
+}
 
 export { isSafeAttachmentName };
 
@@ -119,7 +163,18 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
   if (!getAgentGroup(targetAgentGroupId)) {
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
-  const { session: targetSession } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+
+  // Reply-routing for multi-session orchestrators (e.g. TianYi wired to a DM
+  // AND a group chat). When the target has multiple active sessions, default
+  // resolveSession picks "most recently created" — which silently misroutes
+  // replies. Before falling back to that, check the SENDER's inbound.db for
+  // the source_session_id stamped on the most recent A2A message FROM the
+  // target. If found, route the reply back to that originating session.
+  let targetSession = resolveReplyTargetSession(session, targetAgentGroupId);
+  if (!targetSession) {
+    targetSession = resolveSession(targetAgentGroupId, null, null, 'agent-shared').session;
+  }
+
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // If the source message references files (via `send_file`), forward the
@@ -137,6 +192,9 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
     channelType: 'agent',
     threadId: null,
     content: forwardedContent,
+    // Stamp this so when the target later replies, the router can find its
+    // way back to the originating session even when the target has multiple.
+    sourceSessionId: session.id,
   });
   log.info('Agent message routed', {
     from: session.agent_group_id,

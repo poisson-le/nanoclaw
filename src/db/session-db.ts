@@ -108,16 +108,51 @@ export function insertMessage(
      * Host countDueMessages gates on this; container reads everything.
      */
     trigger?: 0 | 1;
+    /**
+     * For agent-to-agent inbound only: the session id of the caller that
+     * dispatched this message. Used by the reply router to send agent
+     * responses back to the correct caller session when the target agent
+     * has multiple active sessions (DM + group chats). NULL otherwise.
+     */
+    sourceSessionId?: string | null;
   },
 ): void {
   db.prepare(
-    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger)
-     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger)`,
+    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id)
+     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId)`,
   ).run({
     ...message,
     trigger: message.trigger ?? 1,
+    sourceSessionId: message.sourceSessionId ?? null,
     seq: nextEvenSeq(db),
   });
+}
+
+/**
+ * Look up the source_session_id stamped on the most recent inbound A2A
+ * message from a given peer agent group. Used by the router when an agent
+ * replies to a peer that has multiple active sessions: we send the reply
+ * back to whichever session originated the dispatch, not whichever was
+ * created most recently.
+ *
+ * Returns the source session id, or null if no prior A2A message from that
+ * peer exists (or none carries a source_session_id — e.g. pre-migration rows).
+ */
+export function findReplyTargetSession(
+  db: Database.Database,
+  peerAgentGroupId: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT source_session_id FROM messages_in
+       WHERE channel_type = 'agent'
+         AND platform_id = ?
+         AND source_session_id IS NOT NULL
+       ORDER BY datetime(timestamp) DESC
+       LIMIT 1`,
+    )
+    .get(peerAgentGroupId) as { source_session_id: string | null } | undefined;
+  return row?.source_session_id ?? null;
 }
 
 export function countDueMessages(db: Database.Database): number {
@@ -304,5 +339,14 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // All pre-existing rows got written with the old "every inbound wakes
     // the agent" semantics, so backfill 1 and default 1 for new inserts.
     db.prepare('ALTER TABLE messages_in ADD COLUMN trigger INTEGER NOT NULL DEFAULT 1').run();
+  }
+  if (!cols.has('source_session_id')) {
+    // Pre-existing rows have NULL — that's fine; they pre-date the
+    // multi-session reply routing and fall back to the legacy
+    // findSessionByAgentGroup path. New A2A messages will stamp this field.
+    db.prepare('ALTER TABLE messages_in ADD COLUMN source_session_id TEXT').run();
+    db.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_messages_in_a2a_source ON messages_in(channel_type, platform_id, timestamp)',
+    ).run();
   }
 }

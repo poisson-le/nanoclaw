@@ -171,9 +171,16 @@ CREATE TABLE IF NOT EXISTS messages_in (
   platform_id    TEXT,
   channel_type   TEXT,
   thread_id      TEXT,
-  content        TEXT NOT NULL
+  content        TEXT NOT NULL,
+  source_session_id TEXT
+                 -- For agent-to-agent inbound only: the session id of the
+                 -- caller that originated this dispatch. Used by the router
+                 -- to send replies back to the correct caller session when
+                 -- the target agent has multiple sessions (DM + groups).
+                 -- NULL for non-A2A inbound (Telegram, CLI, etc.).
 );
 CREATE INDEX IF NOT EXISTS idx_messages_in_series ON messages_in(series_id);
+CREATE INDEX IF NOT EXISTS idx_messages_in_a2a_source ON messages_in(channel_type, platform_id, timestamp);
 
 -- Host tracks delivery outcomes for messages_out IDs.
 -- Avoids writing to outbound.db (container-owned).
