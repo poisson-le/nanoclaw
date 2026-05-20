@@ -102,10 +102,14 @@ const DISPATCH_VERB_PATTERNS = [
   String.raw`(\bis on it\b|\bwill handle\b|\bis working on\b|\bis now \w+ing\b|\bhas started\b|\bis searching\b|\bis drafting\b|\bis running\b|\bhas been (?:asked|dispatched|tasked|sent))`,
   // Dispatched/sent/forwarded to <Agent>
   String.raw`\b(?:dispatched|sent|forwarded|forwarding|dispatching|sending|tasked|asked)\b[^.\n]{0,80}?\bto\b`,
-  // I'll [send|forward|dispatch] (the brief/it) to <Agent>
-  String.raw`\b(?:I'?ll|I will|going to)\s+(?:send|forward|dispatch|hand)\b[^.\n]{0,80}?\bto\b`,
   // Brief is with <Agent> / task is with <Agent>
   String.raw`\b(?:brief|task|request|dispatch) is (?:with|now with|in front of)\b`,
+  // Note: the future-tense pattern ("I'll send / I will dispatch / going to forward")
+  // was removed (2026-05-20) — it produced false positives when agents requested
+  // confirmation before dispatching ("Confirm and I'll dispatch to Scout"), which
+  // is permission-asking, not a claim of completed action. This detector audits
+  // *claimed completed actions*; future-tense intent without follow-through is a
+  // different failure class (silent stall) and belongs to a separate detector.
 ];
 
 /**
