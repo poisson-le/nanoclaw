@@ -49,11 +49,7 @@ function resolveReplyTargetSession(senderSession: Session, targetAgentGroupId: s
     if (!replyTargetSessionId) return null;
     const candidate = getSession(replyTargetSessionId);
     // Validate the session still belongs to the right agent and is active.
-    if (
-      candidate &&
-      candidate.agent_group_id === targetAgentGroupId &&
-      candidate.status === 'active'
-    ) {
+    if (candidate && candidate.agent_group_id === targetAgentGroupId && candidate.status === 'active') {
       log.debug('Reply routed to originating caller session', {
         sender: senderSession.id,
         target: candidate.id,

@@ -35,6 +35,36 @@ import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
+// TianYi is the orchestrator with profile-aware behaviour; her group-chat
+// wakeups get a host-side reminder to load participant profiles before reply.
+// See injectProfileReminder() and deliverToAgent() below.
+const TIANYI_AGENT_GROUP_ID = 'ag-1779158848014-nyfezd';
+
+const PROFILE_REMINDER_ANNOTATION =
+  '[host-annotation: participant-profile-reminder]\n' +
+  'You have been invoked in a group session. BEFORE composing your reply:\n' +
+  '1. Read `/workspace/agent/participants.json` to identify all known participants in this conversation.\n' +
+  '2. For any participant whose entry has `profile_path`, read the referenced file via the Read tool.\n' +
+  'Profile content shapes tone, brief drafting, supervision-level confirmation, and project assignment.\n' +
+  'Skip the file reads only if you have already loaded each relevant profile earlier in this same session.\n' +
+  '[/host-annotation]\n\n';
+
+/**
+ * Prepend the profile-reminder annotation to a chat message's text content,
+ * preserving any non-text fields. Returns the original raw content unchanged
+ * if it can't be parsed or doesn't carry a text field.
+ */
+function injectProfileReminder(rawContent: string): string {
+  try {
+    const parsed = JSON.parse(rawContent);
+    if (typeof parsed?.text !== 'string') return rawContent;
+    parsed.text = PROFILE_REMINDER_ANNOTATION + parsed.text;
+    return JSON.stringify(parsed);
+  } catch {
+    return rawContent;
+  }
+}
+
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -447,6 +477,24 @@ async function deliverToAgent(
     }
   }
 
+  // Profile-load reminder injection: when TianYi is woken in a group context,
+  // prepend a host-side annotation telling her to load participants.json and
+  // any referenced profiles before composing a reply. This mirrors the BH
+  // normaliser pattern (host-side mutation of message content) because seed
+  // text alone has failed twice to enforce profile-loading on session entry
+  // against the model's "answer the user" prior. Only fires on the actual
+  // wake-triggering message (not stored context messages), and only for
+  // TianYi in group chats — DMs with Aaron don't need it.
+  let finalContent = event.message.content;
+  if (
+    wake &&
+    agent.agent_group_id === TIANYI_AGENT_GROUP_ID &&
+    mg.is_group === 1 &&
+    (event.message.kind === 'chat' || event.message.kind === 'chat-sdk')
+  ) {
+    finalContent = injectProfileReminder(event.message.content);
+  }
+
   writeSessionMessage(session.agent_group_id, session.id, {
     id: messageIdForAgent(event.message.id, agent.agent_group_id),
     kind: event.message.kind,
@@ -454,7 +502,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content: finalContent,
     trigger: wake ? 1 : 0,
   });
 

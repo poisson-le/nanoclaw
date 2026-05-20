@@ -45,6 +45,39 @@ const MAX_DELIVERY_ATTEMPTS = 3;
 const COMPLIANCE_AGENT_GROUP_ID = 'ag-1779121017094-2i35ns';
 const COMPLIANCE_LOGS_DIR = '/home/aaron/nanoclaw-v2/data/compliance-logs';
 
+// BountyHunter → TianYi normalisation: structural extraction host-side after
+// BH's seed-level format enforcement failed repeatedly even with hardening.
+// See src/modules/normalisers/bountyhunter.ts for the rationale.
+const BOUNTYHUNTER_AGENT_GROUP_ID = 'ag-1779182034060-e7cwla';
+const TIANYI_AGENT_GROUP_ID = 'ag-1779158848014-nyfezd';
+
+/**
+ * Strip dispatch-receipt seq numbers from user-facing chat text.
+ *
+ * The `send_message` MCP tool returns the per-session outbound seq id on
+ * success — e.g. `"Message sent to literature_scout (id: 161)"`. Agents
+ * frequently surface this in their next user-facing reply ("Done — sent as
+ * message 161", "Brief forwarded (message 157)"). It's useful diagnostic
+ * value internally (a real seq is evidence of a real tool call) but looks
+ * unsophisticated to end users (especially collaborators who don't know
+ * what the number refers to). We strip it from the channel-bound copy
+ * only; the audit detector saw the original above, and the Compliance
+ * archive captures the raw form before this strip runs.
+ *
+ * Only matches the specific dispatch-receipt patterns. Standalone
+ * references like "message #37 above" (intentional cross-reference in
+ * prose) are left intact.
+ */
+function stripDispatchSeqReceipts(text: string): string {
+  return text
+    .replace(/\s*\(id:\s*\d+\)/g, '') // "(id: 161)"
+    .replace(/\s*\(message\s+\d+\)/g, '') // "(message 157)"
+    .replace(/\s+as\s+message\s+#?\d+(?=[\s.,;:!?—–\-]|$)/gi, '') // "as message 161"
+    .replace(/\s+\(message id:?\s*\d+\)/gi, '') // "(message id: 161)"
+    .replace(/[  ]{2,}/g, ' ') // collapse residual double-spaces
+    .replace(/\s+([.,;:!?])/g, '$1'); // clean up space-before-punctuation
+}
+
 interface ComplianceEnvelope {
   from: string;
   to: string;
@@ -395,6 +428,100 @@ async function deliverMessage(
       autoArchiveAgentOutbound(session.agent_group_id, msg, content);
     } catch (err) {
       log.error('Compliance auto-archive failed', { msgId: msg.id, err });
+    }
+  }
+
+  // Generic dispatch-claim audit: catch any agent (not just TianYi) that
+  // says it dispatched to a peer without actually invoking send_message.
+  // Runs on user-facing chat outbounds (not agent-to-agent). When a claim
+  // is detected without a matching actual dispatch in the last 60s, the
+  // outbound text gets a visible warning appended so the user knows to
+  // verify before waiting indefinitely. See src/modules/audits/dispatch-claim-detector.ts
+  // for the rationale.
+  if (msg.kind === 'chat' && msg.channel_type !== 'agent') {
+    const outboundText =
+      typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+    if (outboundText.length >= 10) {
+      try {
+        const { auditDispatchClaims, buildAuditWarning } = await import('./modules/audits/dispatch-claim-detector.js');
+        const suspected = auditDispatchClaims(session.agent_group_id, session.id, outboundText);
+        if (suspected.length > 0) {
+          const warning = buildAuditWarning(suspected);
+          (content as { text: string }).text = outboundText + warning;
+          msg.content = JSON.stringify(content);
+          log.warn('Dispatch-claim audit flagged hallucinated dispatch', {
+            msgId: msg.id,
+            sourceAgentGroupId: session.agent_group_id,
+            suspected: suspected.map((s) => ({
+              dest: s.destination_name,
+              evidence: s.evidence_phrase.substring(0, 80),
+            })),
+          });
+        }
+      } catch (err) {
+        log.error('Dispatch-claim audit failed (non-fatal)', { msgId: msg.id, err });
+      }
+    }
+
+    // Strip dispatch-receipt seq numbers from user-facing text. The
+    // send_message MCP tool returns "Message sent to X (id: <seq>)" on
+    // success, and agents tend to surface the seq in their user-facing
+    // reply ("Done — sent as message 161"). Useful diagnostic but looks
+    // unsophisticated to end users (especially collaborators who don't
+    // know what the number refers to). The original text was already
+    // seen by the audit detector above and is preserved in the
+    // Compliance archive — only the user-facing copy is cleaned.
+    const finalText =
+      typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+    if (finalText) {
+      const cleaned = stripDispatchSeqReceipts(finalText);
+      if (cleaned !== finalText) {
+        (content as { text: string }).text = cleaned;
+        msg.content = JSON.stringify(content);
+      }
+    }
+  }
+
+  // BH → TianYi normaliser: structural extraction host-side. Runs after the
+  // Compliance auto-archive (so Compliance gets the raw text) and before the
+  // agent route (so the annotation is in the message TianYi will read). Mutates
+  // msg.content in-place to append the annotation block. Best-effort — any
+  // failure here is logged and the original outbound flows through unchanged;
+  // TianYi's seed has a fallback path for the missing-annotation case.
+  if (
+    msg.kind === 'chat' &&
+    msg.channel_type === 'agent' &&
+    session.agent_group_id === BOUNTYHUNTER_AGENT_GROUP_ID &&
+    msg.platform_id === TIANYI_AGENT_GROUP_ID
+  ) {
+    const bhText = typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+    const { shouldNormalise, normaliseBountyHunterOutput, persistExtract } =
+      await import('./modules/normalisers/bountyhunter.js');
+    if (shouldNormalise(bhText)) {
+      try {
+        log.info('BH normaliser starting', { msgId: msg.id, length: bhText.length });
+        const extract = await normaliseBountyHunterOutput(bhText);
+        if (extract) {
+          const { extractPath, annotation } = persistExtract(session.id, msg.id, extract);
+          // Mutate the in-memory content with the annotation appended, then
+          // re-serialise into msg.content so downstream routing carries it.
+          (content as { text: string }).text = bhText + annotation;
+          msg.content = JSON.stringify(content);
+          log.info('BH normaliser complete', {
+            msgId: msg.id,
+            extractPath,
+            grade: extract.grade,
+            modesAddressed: Object.values(extract.failure_modes).filter((m) => m.addressed).length,
+          });
+        }
+      } catch (err) {
+        log.error('BH normaliser failed (non-fatal)', { msgId: msg.id, err });
+      }
+    } else {
+      log.debug('BH outbound skipped by normaliser heuristic', {
+        msgId: msg.id,
+        length: bhText.length,
+      });
     }
   }
 

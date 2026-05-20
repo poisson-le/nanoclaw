@@ -138,10 +138,7 @@ export function insertMessage(
  * Returns the source session id, or null if no prior A2A message from that
  * peer exists (or none carries a source_session_id — e.g. pre-migration rows).
  */
-export function findReplyTargetSession(
-  db: Database.Database,
-  peerAgentGroupId: string,
-): string | null {
+export function findReplyTargetSession(db: Database.Database, peerAgentGroupId: string): string | null {
   const row = db
     .prepare(
       `SELECT source_session_id FROM messages_in
