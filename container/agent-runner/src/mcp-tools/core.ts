@@ -131,14 +131,58 @@ export const sendMessage: McpToolDefinition = {
   },
 };
 
+/**
+ * Shared file-send handler used by both send_file and reply_with_files.
+ *
+ * Routing is the only thing that differs between the two tools — the file
+ * staging + outbound write are identical. Centralising avoids drift if the
+ * outbox layout or content schema changes.
+ */
+function performFileSend(args: {
+  routing: { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string };
+  filePath: string;
+  filename?: string;
+  text?: string;
+  toolName: string;
+}): ReturnType<typeof ok> | ReturnType<typeof err> {
+  const resolvedPath = path.isAbsolute(args.filePath)
+    ? args.filePath
+    : path.resolve('/workspace/agent', args.filePath);
+  if (!fs.existsSync(resolvedPath)) return err(`File not found: ${args.filePath}`);
+
+  const id = generateId();
+  const filename = args.filename || path.basename(resolvedPath);
+
+  const outboxDir = path.join('/workspace/outbox', id);
+  fs.mkdirSync(outboxDir, { recursive: true });
+  fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
+
+  writeMessageOut({
+    id,
+    kind: 'chat',
+    platform_id: args.routing.platform_id,
+    channel_type: args.routing.channel_type,
+    thread_id: args.routing.thread_id,
+    content: JSON.stringify({ text: args.text || '', files: [filename] }),
+  });
+
+  log(`${args.toolName}: ${id} → ${args.routing.resolvedName} (${filename})`);
+  return ok(`File sent to ${args.routing.resolvedName} (id: ${id}, filename: ${filename})`);
+}
+
 export const sendFile: McpToolDefinition = {
   tool: {
     name: 'send_file',
-    description: 'Send a file to a named destination. If you have only one destination, you can omit `to`.',
+    description:
+      'Send a file to a named destination — used for forwarding files to a DIFFERENT conversation than the current one (e.g. cross-channel forward). To send a file as a reply to the current conversation, prefer `reply_with_files` instead — it routes automatically and never requires guessing a destination name.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        to: { type: 'string', description: 'Destination name. Optional if you have only one destination.' },
+        to: {
+          type: 'string',
+          description:
+            'Destination name from your destinations list. Required when sending to a different conversation than the one you are currently in. If omitted, the file is sent to the current conversation (equivalent to reply_with_files).',
+        },
         path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
@@ -153,27 +197,70 @@ export const sendFile: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
-    if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
-
-    const id = generateId();
-    const filename = (args.filename as string) || path.basename(resolvedPath);
-
-    const outboxDir = path.join('/workspace/outbox', id);
-    fs.mkdirSync(outboxDir, { recursive: true });
-    fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
-
-    writeMessageOut({
-      id,
-      kind: 'chat',
-      platform_id: routing.platform_id,
-      channel_type: routing.channel_type,
-      thread_id: routing.thread_id,
-      content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
+    return performFileSend({
+      routing,
+      filePath,
+      filename: args.filename as string | undefined,
+      text: args.text as string | undefined,
+      toolName: 'send_file',
     });
+  },
+};
 
-    log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
-    return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
+/**
+ * reply_with_files — strict-reply file send.
+ *
+ * Use case: agent received a request via channel X, wants to reply with a
+ * file attachment. Existing `send_file` supports this via "omit `to`", but
+ * the tool description doesn't surface that path, so agents (incl. TianYi
+ * on 2026-05-22) read `send_file` as "must specify destination" and pick a
+ * named one — often the wrong one when the agent is wired to multiple
+ * channels (DM + group). reply_with_files makes the intent unambiguous and
+ * has no `to` parameter at all, so there's no destination to guess.
+ *
+ * Behaviour: routes via session_routing (the channel + platform + thread
+ * the current message arrived on). Errors loudly if no session context
+ * exists — the agent should use `send_file` instead in that case.
+ */
+export const replyWithFiles: McpToolDefinition = {
+  tool: {
+    name: 'reply_with_files',
+    description:
+      'Reply to the current conversation with a file attachment. Use this whenever you want to send a file back to whoever sent you the current request — same routing as a normal text reply, just with a file attached. Does NOT take a destination name; the file is delivered to the same channel the current message arrived on. If you need to send a file to a DIFFERENT conversation (cross-channel forward), use `send_file` instead.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
+        text: { type: 'string', description: 'Optional accompanying message / caption' },
+        filename: { type: 'string', description: 'Display name (default: basename of path)' },
+      },
+      required: ['path'],
+    },
+  },
+  async handler(args) {
+    const filePath = args.path as string;
+    if (!filePath) return err('path is required');
+
+    const session = getSessionRouting();
+    if (!session.channel_type || !session.platform_id) {
+      return err(
+        'No active conversation context — reply_with_files needs an incoming message to reply to. ' +
+          'If you meant to send to a specific destination, use send_file with `to` instead.',
+      );
+    }
+
+    return performFileSend({
+      routing: {
+        channel_type: session.channel_type,
+        platform_id: session.platform_id,
+        thread_id: session.thread_id,
+        resolvedName: '(current conversation)',
+      },
+      filePath,
+      filename: args.filename as string | undefined,
+      text: args.text as string | undefined,
+      toolName: 'reply_with_files',
+    });
   },
 };
 
@@ -259,4 +346,4 @@ export const addReaction: McpToolDefinition = {
   },
 };
 
-registerTools([sendMessage, sendFile, editMessage, addReaction]);
+registerTools([sendMessage, sendFile, replyWithFiles, editMessage, addReaction]);
