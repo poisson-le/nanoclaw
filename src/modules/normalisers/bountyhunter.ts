@@ -72,9 +72,14 @@ GRADE MAPPING RULES (apply these strictly):
 
 FAILURE MODES (the seven canonical academic-gap failure modes):
 - The input may address these as named section headers, narrative weave, "reviewer risks", or in any other form. Map content SEMANTICALLY — do not require exact header matches.
+- Modes 6 and 7 may appear in the input under either of two forms: "Reviewer appetite" / "Weak reviewer appetite", and "Methodological readiness" / "Poor methodological readiness". Both forms map to the same internal mode ID ("reviewer-appetite" and "methodological-readiness" respectively). The canonical phrasing in newer BountyHunter output is "Weak reviewer appetite" and "Poor methodological readiness" (uniform "problem" framing across all seven).
 - "addressed" = true only if the analysis substantively discusses that specific concern (not just mentions it in passing).
-- If addressed=true: "verdict" is "passes" (no concern), "flagged" (concern raised but not fully resolved), or "fixed" (concern raised and mitigated). "note" is a <=200-char summary.
-- If addressed=false: still include "verdict": "passes" (placeholder) and "note": "" — every mode must have all three fields for schema consistency.
+- BountyHunter's output may now include an explicit verdict line per mode in the form "Verdict: Unlikely" | "Verdict: Likely" | "Verdict: Indeterminate". Map these to the schema's verdict field as follows:
+    * "Unlikely" → verdict: "passes", addressed: true (BH judged the problem will not materialise)
+    * "Likely" → verdict: "flagged", addressed: true (BH judged the problem is or will be a concern)
+    * "Indeterminate" → verdict: "unaddressed", addressed: false (BH could not assess)
+- If addressed=true without an explicit verdict line: choose "passes" | "flagged" | "fixed" by semantic inference (legacy fallback for older BH output). "note" is a <=200-char summary.
+- If addressed=false: include "verdict": "unaddressed" and "note": "" — every mode must have all three fields for schema consistency.
 
 Return ONLY the JSON object. No \`\`\`json fences. No commentary before or after.`;
 
@@ -293,10 +298,37 @@ export function persistExtract(
   const extractPath = path.join(dir, `${a2aMsgId}.json`);
   fs.writeFileSync(extractPath, JSON.stringify(extract, null, 2) + '\n');
 
+  // Map internal verdict → user-display verdict for TianYi's Section 3 table.
+  // - "passes" / "fixed" → "Unlikely" (no concern, either inherently fine or mitigated)
+  // - "flagged"          → "Likely" (concern raised, not fully mitigated)
+  // - "unaddressed"      → "Indeterminate" (BH did not assess)
+  // - addressed=false with any verdict → "Indeterminate"
+  const displayVerdict = (m: { addressed: boolean; verdict?: string }): string => {
+    if (!m.addressed || m.verdict === 'unaddressed') return 'Indeterminate';
+    if (m.verdict === 'flagged') return 'Likely';
+    // passes, fixed, or missing-but-addressed → Unlikely (best inference)
+    return 'Unlikely';
+  };
+
+  // Display order matches the canonical list in BH's seed; display labels are
+  // the new uniform-problem framing (modes 6 and 7 renamed). Internal IDs in
+  // extract.failure_modes stay snake-kebab to avoid breaking other consumers.
+  const MODE_DISPLAY: Array<[string, string]> = [
+    ['scope-too-narrow', 'Scope — too narrow'],
+    ['scope-too-broad', 'Scope — too broad'],
+    ['theoretical-insufficiency', 'Theoretical insufficiency'],
+    ['application-ceiling', 'Application ceiling'],
+    ['temporal-risk', 'Temporal risk'],
+    ['reviewer-appetite', 'Weak reviewer appetite'],
+    ['methodological-readiness', 'Poor methodological readiness'],
+  ];
+
+  const modeLines = MODE_DISPLAY.map(([id, label]) => {
+    const m = extract.failure_modes[id] ?? { addressed: false };
+    return `  - ${label}: ${displayVerdict(m)}`;
+  }).join('\n');
+
   const addressedCount = Object.values(extract.failure_modes).filter((m) => m.addressed).length;
-  const unaddressedModes = Object.entries(extract.failure_modes)
-    .filter(([, v]) => !v.addressed)
-    .map(([k]) => k);
 
   const annotation =
     '\n\n' +
@@ -304,7 +336,8 @@ export function persistExtract(
     `Path: ${extractPath}\n` +
     `Grade: ${extract.grade} (mapped from "${extract.grade_original_form}"${extract.grade_inferred ? ', inferred' : ''})\n` +
     `Gap type: ${extract.gap_type}\n` +
-    `Failure modes addressed: ${addressedCount}/7${unaddressedModes.length ? ' (missing: ' + unaddressedModes.join(', ') + ')' : ''}\n` +
+    `Failure modes (verdict per mode):\n${modeLines}\n` +
+    `Failure modes addressed: ${addressedCount}/7\n` +
     `Papers cited (markers): ${extract.papers_cited_markers.length ? extract.papers_cited_markers.join(', ') : '(none detected)'}\n` +
     `Research questions: ${extract.research_questions.length}; Hypotheses: ${extract.hypotheses.length}\n` +
     'Citation hallucination check: not run at normalisation; Stage 4.5 QC handles citation verification.\n' +

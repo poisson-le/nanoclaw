@@ -102,10 +102,14 @@ const DISPATCH_VERB_PATTERNS = [
   String.raw`(\bis on it\b|\bwill handle\b|\bis working on\b|\bis now \w+ing\b|\bhas started\b|\bis searching\b|\bis drafting\b|\bis running\b|\bhas been (?:asked|dispatched|tasked|sent))`,
   // Dispatched/sent/forwarded to <Agent>
   String.raw`\b(?:dispatched|sent|forwarded|forwarding|dispatching|sending|tasked|asked)\b[^.\n]{0,80}?\bto\b`,
-  // I'll [send|forward|dispatch] (the brief/it) to <Agent>
-  String.raw`\b(?:I'?ll|I will|going to)\s+(?:send|forward|dispatch|hand)\b[^.\n]{0,80}?\bto\b`,
   // Brief is with <Agent> / task is with <Agent>
   String.raw`\b(?:brief|task|request|dispatch) is (?:with|now with|in front of)\b`,
+  // Note: the future-tense pattern ("I'll send / I will dispatch / going to forward")
+  // was removed (2026-05-20) — it produced false positives when agents requested
+  // confirmation before dispatching ("Confirm and I'll dispatch to Scout"), which
+  // is permission-asking, not a claim of completed action. This detector audits
+  // *claimed completed actions*; future-tense intent without follow-through is a
+  // different failure class (silent stall) and belongs to a separate detector.
 ];
 
 /**
@@ -218,23 +222,37 @@ export function auditDispatchClaims(
   return suspected;
 }
 
+function prettyDestName(localName: string): string {
+  return localName
+    .split('_')
+    .map((w) => (w.length === 0 ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
+}
+
+function joinList(items: string[]): string {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return items.slice(0, -1).join(', ') + ', and ' + items[items.length - 1];
+}
+
 /**
  * Build a compact human-readable warning string for appending to the
  * user-facing message. Returns empty string if there are no suspected claims.
+ *
+ * Phrasing is deliberately soft and conversational — this message lands in a
+ * non-technical user's chat (Telegram, etc.) and an alarming "Host audit:
+ * agent claimed dispatch that did not happen" framing reads as a system
+ * error report. Single italic line, plain language, action-oriented. The
+ * destination name still appears (title-cased) so the user knows who the
+ * agent claimed to forward to. Technical details (60s window, evidence
+ * phrase) remain in the log.warn() entry for developer diagnostics.
  */
 export function buildAuditWarning(suspected: SuspectedClaim[]): string {
   if (suspected.length === 0) return '';
-  const lines: string[] = [];
-  lines.push('');
-  lines.push('---');
-  lines.push('⚠️ **Host audit:** the agent appears to have claimed a dispatch that did not actually happen.');
-  for (const s of suspected) {
-    lines.push(
-      `- Claimed dispatch to **${s.destination_name}** — no matching agent-to-agent send found within the last ${DISPATCH_WINDOW_SECONDS}s.`,
-    );
-    lines.push(`  Evidence: *"${s.evidence_phrase.trim()}"*`);
-  }
-  lines.push('');
-  lines.push('Verify with the agent before assuming the dispatch has occurred.');
-  return lines.join('\n');
+  const names = suspected.map((s) => `**${prettyDestName(s.destination_name)}**`);
+  return (
+    `\n\n---\n*Note: the previous message mentioned forwarding this to ${joinList(names)}, ` +
+    `but I didn't see the handoff actually go through. Worth checking in if you're expecting a reply.*`
+  );
 }

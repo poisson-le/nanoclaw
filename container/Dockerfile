@@ -56,6 +56,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
        fi \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Document generation (pandoc + PDF engine) -------------------------------
+# Used by analytical agents (TianYi, Bounty Hunter, Diamond Cutter, QC) for
+# long-output file delivery: markdown → docx, markdown → PDF.
+#
+# weasyprint chosen over xelatex: ~10MB + cairo/pango (already pulled in by
+# chromium) vs ~500MB+ for texlive. Renders CJK cleanly when fonts-noto-cjk is
+# present (opt-in via INSTALL_CJK_FONTS=true above).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        pandoc \
+        weasyprint \
+    && rm -rf /var/lib/apt/lists/*
+
 # Chromium path for agent-browser / Playwright consumers
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
