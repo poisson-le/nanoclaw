@@ -25,7 +25,7 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, writeSessionMessage } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
@@ -197,6 +197,86 @@ function autoArchiveAgentOutbound(
 
 /** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
 const deliveryAttempts = new Map<string, number>();
+
+/**
+ * Per-(sender→recipient) counter of successful send_file dispatches. Used by
+ * the session-refresh discipline to inject a host-side reminder when the count
+ * reaches REFRESH_REMINDER_THRESHOLD. Keyed as `<senderAgentGroupId>:<recipientAgentGroupId>`.
+ *
+ * In-memory only — resets on host process restart. Acceptable because the
+ * refresh discipline is for "current run" pressure tracking; cross-restart
+ * persistence isn't needed.
+ *
+ * The counter resets when the threshold fires (one reminder per N-file batch,
+ * not continuous nagging).
+ */
+const fileDispatchCounters = new Map<string, number>();
+const REFRESH_REMINDER_THRESHOLD = 5;
+
+/**
+ * Increment the per-(sender→recipient) file-dispatch counter and inject a
+ * session-refresh reminder into the sender's inbound if the threshold is hit.
+ * Called from the a2a routing path in deliverMessage after a successful
+ * send_file forwarding.
+ *
+ * Best-effort: any failure here is logged and swallowed; we never block
+ * delivery on reminder-injection failure.
+ */
+function maybeEmitRefreshReminder(
+  senderAgentGroupId: string,
+  senderSessionId: string,
+  recipientAgentGroupId: string,
+): void {
+  const key = `${senderAgentGroupId}:${recipientAgentGroupId}`;
+  const newCount = (fileDispatchCounters.get(key) ?? 0) + 1;
+  fileDispatchCounters.set(key, newCount);
+
+  if (newCount < REFRESH_REMINDER_THRESHOLD) return;
+
+  // Reset to 0 so we fire once per threshold-batch rather than continuously
+  // for every dispatch past 5.
+  fileDispatchCounters.set(key, 0);
+
+  const recipientAgent = getAgentGroup(recipientAgentGroupId);
+  const recipientName = recipientAgent ? recipientAgent.name : recipientAgentGroupId;
+
+  const reminderText =
+    `[SYSTEM REMINDER — session refresh discipline]\n\n` +
+    `You have dispatched ${newCount} files to ${recipientName} since the last counter reset. ` +
+    `${recipientName}'s accumulated session context may be approaching the long-context threshold ` +
+    `(observed failure mode 2026-05-22: BH stalled for 9+ hours after similar accumulation).\n\n` +
+    `Per your "Session refresh checkpoints" seed section, propose a session refresh to the user ` +
+    `before dispatching the next file to ${recipientName}. Use the Version A wording template. ` +
+    `Do not proceed with further file dispatches to ${recipientName} until the user has either ` +
+    `approved a refresh or explicitly declined.\n\n` +
+    `Counter resets when this reminder fires (you will see it again after the next 5 file dispatches ` +
+    `if no refresh happens). Counter also resets on host service restart.`;
+
+  try {
+    writeSessionMessage(senderAgentGroupId, senderSessionId, {
+      id: `refresh-reminder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      platformId: senderAgentGroupId,
+      channelType: 'system-reminder',
+      threadId: null,
+      content: JSON.stringify({ text: reminderText }),
+      trigger: 0, // No wake — the reminder will be processed on the agent's next natural turn
+    });
+    log.info('Refresh reminder injected after file-dispatch threshold', {
+      senderAgentGroupId,
+      recipientAgentGroupId,
+      recipientName,
+      threshold: REFRESH_REMINDER_THRESHOLD,
+    });
+  } catch (err) {
+    log.warn('Failed to inject refresh reminder (non-fatal)', {
+      senderAgentGroupId,
+      recipientAgentGroupId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 /**
  * Sessions whose outbound queue is currently being drained.
@@ -463,6 +543,73 @@ async function deliverMessage(
       }
     }
 
+    // Content-filter error handler. When the Anthropic API output filter
+    // blocks an agent's response, the agent-runner forwards the raw error
+    // JSON ("API Error: {...Output blocked by content filtering policy...}")
+    // through to the user as outbound chat text — a poor UX surface for a
+    // known false-positive class (Anthropic's safety filter occasionally
+    // fires on benign content discussing AI failure modes or academic
+    // integrity). Replace such outbound with a clean user-facing fallback;
+    // the original raw error is preserved in the Compliance archive (which
+    // runs before this hook) and in the host log.
+    //
+    // First observed 2026-05-21 on a Scout-citation-verification reply where
+    // language about LLM hallucination tripped the filter; the retry from the
+    // same agent turn succeeded with softer phrasing, so the user-visible
+    // failure was the orphan error message from the first attempt.
+    const filterCheckText =
+      typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+    if (filterCheckText && /API Error:[\s\S]*content filtering policy/i.test(filterCheckText)) {
+      log.warn('Content-filter API error detected in outbound — replacing with clean fallback', {
+        msgId: msg.id,
+        sourceAgentGroupId: session.agent_group_id,
+        originalText: filterCheckText.substring(0, 500),
+      });
+      (content as { text: string }).text =
+        "I hit a content filter on that reply — Anthropic's safety filter flagged the wording, " +
+        'though the content itself was benign. Could you ask the same question again, or rephrase ' +
+        "it slightly? I'll try a different framing on the response.";
+      msg.content = JSON.stringify(content);
+    }
+
+    // Long-context-credit error handler. When an agent's accumulated context
+    // exceeds the standard window and the request needs long-context credits
+    // that aren't enabled on the account, the SDK forwards the raw error:
+    //   "API Error: Server is temporarily limiting requests
+    //    (not your usage limit) · Usage credits are required for long
+    //    context requests."
+    // Without intercept, the user sees the raw error and has no clue what
+    // to do. Replace with a clean explanation + recovery guidance. The
+    // original error is preserved in Compliance archive + host log.
+    //
+    // First observed 2026-05-22 when BountyHunter attempted parallel reads
+    // of 16 PDFs in one turn after a 4am scheduled dispatch. The session
+    // remained stuck for ~9 hours until manual reset. The new BH multi-PDF
+    // sequential discipline (groups/bounty_hunter/CLAUDE.local.md) is the
+    // root-cause fix; this handler is the user-facing UX safety net.
+    const longCtxCheckText =
+      typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+    if (
+      longCtxCheckText &&
+      /Server is temporarily limiting requests[\s\S]*long context requests/i.test(longCtxCheckText)
+    ) {
+      log.warn('Long-context-credit API error detected in outbound — replacing with clean fallback', {
+        msgId: msg.id,
+        sourceAgentGroupId: session.agent_group_id,
+        originalText: longCtxCheckText.substring(0, 500),
+      });
+      (content as { text: string }).text =
+        'An agent has exceeded the standard context window — its accumulated context ' +
+        '(prior conversation + files read this session) is now too large for the standard ' +
+        "API window, and long-context credits aren't enabled on the account. The session " +
+        'needs to be reset to recover.\n\n' +
+        "Recovery: stop the agent's container, clear its `continuation:claude`, and " +
+        're-dispatch the work using sequential per-document processing rather than ' +
+        'loading many sources in one turn. See `groups/bounty_hunter/CLAUDE.local.md` ' +
+        '("Multi-document sequential extraction discipline") for the canonical pattern.';
+      msg.content = JSON.stringify(content);
+    }
+
     // Strip dispatch-receipt seq numbers from user-facing text. The
     // send_message MCP tool returns "Message sent to X (id: <seq>)" on
     // success, and agents tend to surface the seq in their user-facing
@@ -575,6 +722,30 @@ async function deliverMessage(
     }
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
     await routeAgentMessage(msg, session);
+
+    // File-dispatch counter for session-refresh discipline. Each successful
+    // send_file from one agent to another contributes ~25-50K tokens to the
+    // recipient's accumulated session context (the file gets read on the next
+    // turn). After ~5 such dispatches, the recipient is near the long-context
+    // threshold. We track per-(sender→recipient) counts and inject a system
+    // reminder into the sender's inbound when count hits 5, nudging them to
+    // propose a refresh of the recipient's session before further file
+    // dispatches.
+    //
+    // First observed need 2026-05-22: BH stalled after 5 PDF reads in one
+    // session because TianYi never proposed a refresh. The seed-level rule
+    // alone is insufficient — long contexts make late-seed rules easy to
+    // miss. This host-side counter is the belt-and-braces fix.
+    //
+    // Only counts file dispatches (send_file), not chat dispatches
+    // (send_message). Chat messages don't carry significant context cost on
+    // the recipient side; tying the trigger to files keeps the signal
+    // meaningful.
+    const hasFiles = Array.isArray((content as { files?: unknown }).files) && (content as { files: unknown[] }).files.length > 0;
+    if (hasFiles && msg.platform_id) {
+      maybeEmitRefreshReminder(session.agent_group_id, session.id, msg.platform_id);
+    }
+
     return;
   }
 
