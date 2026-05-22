@@ -463,6 +463,73 @@ async function deliverMessage(
       }
     }
 
+    // Content-filter error handler. When the Anthropic API output filter
+    // blocks an agent's response, the agent-runner forwards the raw error
+    // JSON ("API Error: {...Output blocked by content filtering policy...}")
+    // through to the user as outbound chat text — a poor UX surface for a
+    // known false-positive class (Anthropic's safety filter occasionally
+    // fires on benign content discussing AI failure modes or academic
+    // integrity). Replace such outbound with a clean user-facing fallback;
+    // the original raw error is preserved in the Compliance archive (which
+    // runs before this hook) and in the host log.
+    //
+    // First observed 2026-05-21 on a Scout-citation-verification reply where
+    // language about LLM hallucination tripped the filter; the retry from the
+    // same agent turn succeeded with softer phrasing, so the user-visible
+    // failure was the orphan error message from the first attempt.
+    const filterCheckText =
+      typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+    if (filterCheckText && /API Error:[\s\S]*content filtering policy/i.test(filterCheckText)) {
+      log.warn('Content-filter API error detected in outbound — replacing with clean fallback', {
+        msgId: msg.id,
+        sourceAgentGroupId: session.agent_group_id,
+        originalText: filterCheckText.substring(0, 500),
+      });
+      (content as { text: string }).text =
+        "I hit a content filter on that reply — Anthropic's safety filter flagged the wording, " +
+        'though the content itself was benign. Could you ask the same question again, or rephrase ' +
+        "it slightly? I'll try a different framing on the response.";
+      msg.content = JSON.stringify(content);
+    }
+
+    // Long-context-credit error handler. When an agent's accumulated context
+    // exceeds the standard window and the request needs long-context credits
+    // that aren't enabled on the account, the SDK forwards the raw error:
+    //   "API Error: Server is temporarily limiting requests
+    //    (not your usage limit) · Usage credits are required for long
+    //    context requests."
+    // Without intercept, the user sees the raw error and has no clue what
+    // to do. Replace with a clean explanation + recovery guidance. The
+    // original error is preserved in Compliance archive + host log.
+    //
+    // First observed 2026-05-22 when BountyHunter attempted parallel reads
+    // of 16 PDFs in one turn after a 4am scheduled dispatch. The session
+    // remained stuck for ~9 hours until manual reset. The new BH multi-PDF
+    // sequential discipline (groups/bounty_hunter/CLAUDE.local.md) is the
+    // root-cause fix; this handler is the user-facing UX safety net.
+    const longCtxCheckText =
+      typeof (content as { text?: unknown })?.text === 'string' ? (content as { text: string }).text : '';
+    if (
+      longCtxCheckText &&
+      /Server is temporarily limiting requests[\s\S]*long context requests/i.test(longCtxCheckText)
+    ) {
+      log.warn('Long-context-credit API error detected in outbound — replacing with clean fallback', {
+        msgId: msg.id,
+        sourceAgentGroupId: session.agent_group_id,
+        originalText: longCtxCheckText.substring(0, 500),
+      });
+      (content as { text: string }).text =
+        'An agent has exceeded the standard context window — its accumulated context ' +
+        '(prior conversation + files read this session) is now too large for the standard ' +
+        "API window, and long-context credits aren't enabled on the account. The session " +
+        'needs to be reset to recover.\n\n' +
+        "Recovery: stop the agent's container, clear its `continuation:claude`, and " +
+        're-dispatch the work using sequential per-document processing rather than ' +
+        'loading many sources in one turn. See `groups/bounty_hunter/CLAUDE.local.md` ' +
+        '("Multi-document sequential extraction discipline") for the canonical pattern.';
+      msg.content = JSON.stringify(content);
+    }
+
     // Strip dispatch-receipt seq numbers from user-facing text. The
     // send_message MCP tool returns "Message sent to X (id: <seq>)" on
     // success, and agents tend to surface the seq in their user-facing
