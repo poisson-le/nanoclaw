@@ -109,6 +109,8 @@ function buildDestinationsSection(): string {
         'To mark something as scratchpad (logged but not sent), wrap it in `<internal>...</internal>`.',
         '',
         'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool.',
+        '',
+        'To reply with a file attachment, call the `reply_with_files` MCP tool. It routes automatically to the current conversation — no destination name needed.',
       ].join('\n');
     }
 
@@ -131,6 +133,10 @@ function buildDestinationsSection(): string {
     lines.push('');
     lines.push(
       'To send a message mid-response, call the `send_message` MCP tool. Omit `to` to send to the current conversation.',
+    );
+    lines.push('');
+    lines.push(
+      'To reply with a file attachment, use the `reply_with_files` MCP tool — it always routes to the current conversation, never to one of the additional destinations above. Use `send_file` with `to` only when you need to forward a file to a different destination from the one you are currently in.',
     );
     return lines.join('\n');
   }
